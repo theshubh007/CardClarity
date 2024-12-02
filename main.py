@@ -8,8 +8,10 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_retrieval_chain
 from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
-
+import re
 from Datachunksplitter import DataChunkSplitter
+import json
+from collections import defaultdict
 from dotenv import load_dotenv
 
 load_dotenv()  # take environment variables from .env (especially openai api key)
@@ -17,7 +19,7 @@ groq_api_key = os.environ["GROQ_API_KEY"]
 st.title("CardClarity: Credit Card Assistant")
 st.sidebar.title("Enter CreditCard MainPage URLs")
 urls = []
-for i in range(3):
+for i in range(2):
     url = st.sidebar.text_input(f"URL {i+1}")
     urls.append(url)
 process_url_clicked = st.sidebar.button("Process URLs")
@@ -46,6 +48,20 @@ if process_url_clicked:
     main_placeholder.text("Data Loading...Started...✅✅✅")
     data = loader.load()
     print("Data object length is: ", len(data))
+    # Save the content of each document to a JSON file
+    documents_to_save = []
+    for i, doc in enumerate(data):
+        documents_to_save.append(
+            {
+                "document_id": i,
+                "content": doc.page_content,  # Assuming doc has a page_content attribute
+                "metadata": doc.metadata,  # Assuming doc has a metadata attribute
+            }
+        )
+
+    # Write the documents to a JSON file
+    with open("data.json", "w") as json_file:
+        json.dump(documents_to_save, json_file, indent=4)  # Save with pretty printing
     #################################################
     ##DataSplitting Phase
     main_placeholder.text("Text Splitter...Started...✅✅✅")
@@ -78,29 +94,126 @@ if query:
     )
     print("dimention of loaded faiss", vectorstore.index.d)
     print("Vectorstore is loaded from file.")
+    # Create a retriever to fetch relevant documents
     retriever = vectorstore.as_retriever(
-        # search_type="similarity", search_kwargs={"k": 3}
+        search_type="similarity",
+        search_kwargs={"k": 10},  # Retrieve more documents initially
     )
-    prompt_template = """Use the following pieces of context to answer the question at the end. Please follow the following rules:
-    1. If you don't know the answer, don't try to make up an answer. Just say "I can't find the final answer but you may want to check the following links".
-    2. If you find the answer, write the answer in a concise way with few sentences maximum.
+
+    # Retrieve relevant documents
+    all_docs = retriever.get_relevant_documents(query)
+    print("All docs are: ", len(all_docs))
+    # Save all retrieved documents to a JSON file
+    all_retrieved_documents = []
+    for i, doc in enumerate(all_docs):
+        all_retrieved_documents.append(
+            {
+                "document_id": i,
+                "content": doc.page_content,  # Assuming doc has a page_content attribute
+                "metadata": doc.metadata,  # Assuming doc has a metadata attribute
+            }
+        )
+
+    # Write all retrieved documents to a JSON file
+    with open("all_retrieved_documents.json", "w") as json_file:
+        json.dump(all_retrieved_documents, json_file, indent=4)
+
+    # Group documents by their metadata source
+    grouped_docs = defaultdict(list)
+    for doc in all_docs:
+        source = doc.metadata.get("source")
+        if source:
+            grouped_docs[source].append(doc)
+
+    # Select up to 2 documents from each unique source
+    selected_documents = []
+    for source, docs in grouped_docs.items():
+        selected_documents.extend(docs[:2])  # Get up to 2 documents from each source
+
+    # Save the selected documents to a JSON file
+    retrieved_documents = []
+    for i, doc in enumerate(selected_documents):
+        retrieved_documents.append(
+            {
+                "document_id": i,
+                "content": doc.page_content,  # Assuming doc has a page_content attribute
+                "metadata": doc.metadata,  # Assuming doc has a metadata attribute
+            }
+        )
+
+    # Write the selected documents to a JSON file
+    with open("selected_documents.json", "w") as json_file:
+        json.dump(retrieved_documents, json_file, indent=4)
+    prompt_template = """STRICT CONTEXT-BASED ANSWER PROTOCOL:
+
+    RULES:
+    1. ONLY answer based EXCLUSIVELY on the provided context.
+    2. If NO relevant information exists in the context, respond with: 
+    "I cannot find a precise answer in the available context."
+    3. STRICTLY PROHIBIT generating answers from external knowledge.
+    4. If context is insufficient, suggest further research.
+
+    CONTEXT:
     {context}
-    Question: {input}
-    Helpful Answer:
-    """
+
+    QUERY: {input}
+
+    RESPONSE GUIDELINES:
+    - Be concise
+    - Use information ONLY from the context
+    - If uncertain, admit lack of definitive information
+
+    Helpful Answer:"""
     PROMPT = PromptTemplate(
         template=prompt_template, input_variables=["input", "context"]
     )
     document_chain = create_stuff_documents_chain(llm, PROMPT)
     retrieval_chain = create_retrieval_chain(retriever, document_chain)
-    result = retrieval_chain.invoke({"input": query})
+    cleaned_query = re.sub(
+        r"(explain this|tell me more|provide details|you know)",
+        "",
+        query,
+        flags=re.IGNORECASE,
+    ).strip()
+    result = retrieval_chain.invoke(
+        {
+            "input": cleaned_query,
+            "max_tokens": 300,  # Limit response length
+            "stop_sequences": ["External Knowledge:", "Beyond Context:"],
+        }
+    )
     st.header("Answer")
     st.write(result["answer"])
     # Display sources, if available
     sources = result.get("sources", None)
-    # sources = [doc.metadata["source"] for doc in docs]
+    sources = [doc.metadata["source"] for doc in docs]
     if sources:
         st.subheader("Sources:")
         # sources_list = sources.split("\n")  # Split the sources by newline
         for source in sources:
             st.write(source)
+
+
+# Enhanced Invocation with Additional Safeguards
+def process_query(query):
+    try:
+        # Preprocess query to remove generic phrases
+        cleaned_query = re.sub(
+            r"(explain this|tell me more|provide details|you know)",
+            "",
+            query,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        result = retrieval_chain.invoke(
+            {
+                "input": cleaned_query,
+                "max_tokens": 300,  # Limit response length
+                "stop_sequences": ["External Knowledge:", "Beyond Context:"],
+            }
+        )
+
+        return result["answer"]
+
+    except Exception as e:
+        return f"Error processing query: {str(e)}"
