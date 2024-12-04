@@ -11,6 +11,7 @@ from langchain.chains import create_retrieval_chain
 from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
 from Datachunksplitter import DataChunkSplitter
+from MultiQueryTechnique import MultiQueryTechnique
 
 
 class CreditCardAssistant:
@@ -83,8 +84,6 @@ class CreditCardAssistant:
         PROMPT = PromptTemplate(
             template=prompt_template, input_variables=["input", "context"]
         )
-        document_chain = create_stuff_documents_chain(self.llm, PROMPT)
-        retrieval_chain = create_retrieval_chain(self.retriever, document_chain)
 
         cleaned_query = re.sub(
             r"(explain this|tell me more|provide details|you know)",
@@ -92,13 +91,32 @@ class CreditCardAssistant:
             query,
             flags=re.IGNORECASE,
         ).strip()
+        multi_query_technique = MultiQueryTechnique(self.huggingface_embeddings)
+        alternative_queries = multi_query_technique.generate_queries(query)
+        print("List of Alternative queries to make context more accurate:")
+        for alt_query in alternative_queries:
+            print("Alt query:", alt_query)
+
+        all_retrieved_docs = []
+        for alt_query in alternative_queries:
+            retrieved_docs = self.retriever.invoke(alt_query)
+            all_retrieved_docs.append(retrieved_docs)    
+
+        # Get unique documents from all retrieved documents
+        unique_docs = multi_query_technique.get_unique_union(all_retrieved_docs)    
+
+
+        document_chain = create_stuff_documents_chain(self.llm, PROMPT)
+        retrieval_chain = create_retrieval_chain(self.retriever, document_chain)
         result = retrieval_chain.invoke(
             {
                 "input": cleaned_query,
                 "max_tokens": 300,
                 "stop_sequences": ["External Knowledge:", "Beyond Context:"],
+                # "context": unique_docs,
             }
         )
+        # unique_docs = [doc for doc in unique_docs if doc.page_content]
 
         return result["answer"], result.get("sources", None)
 
